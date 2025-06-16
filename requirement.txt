@@ -1,0 +1,5 @@
+os
+json
+boto3
+streamlit
+PyPDF2
