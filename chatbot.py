@@ -33,12 +33,14 @@ def get_credentials(username, password):
 
     return creds_response["Credentials"]
 
-def build_prompt(courses, question, structure, chat_history):
+def build_prompt(courses, question, structure, chat_history=None):
+    if chat_history is None:
+        chat_history = []
     prompt = "You are a helpful RMIT course advisor.\n\n"
     
     for msg in chat_history:
-        role = msg["role"]
-        content = msg["content"]
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
         prompt += f"{role.capitalize()}: {content}\n"
 
     prompt += f"User: {question}\n\n"
@@ -49,6 +51,9 @@ def build_prompt(courses, question, structure, chat_history):
     return prompt
 
 def extract_text_from_pdfs(pdf_files):
+    if not pdf_files:
+        return "[No PDF files uploaded]"
+    
     all_text = []
     for pdf_file in pdf_files:
         try:
@@ -59,7 +64,8 @@ def extract_text_from_pdfs(pdf_files):
                     all_text.append(text.strip())
         except Exception as e:
             all_text.append(f"[Error reading file {pdf_file.name}: {str(e)}]")
-    return "\n\n".join(all_text)
+    combined_text = "\n\n".join(all_text)
+    return combined_text if combined_text.strip() else "[No extractable text found in PDF files]"
 
 def invoke_bedrock(prompt_text, max_tokens=640, temperature=0.3, top_p=0.9):
     credentials = get_credentials(USERNAME, PASSWORD)
@@ -97,7 +103,7 @@ def format_chat_history(chat_history):
         lines.append(f"{role}: {msg['content']}\n")
     return "\n".join(lines)
 
-st.set_page_config(page_title="RMIT Cyber Security Course Advisor", layout="centered")
+st.set_page_config(page_title="RMIT Student Support", layout="centered")
 
 with st.container():
     cols = st.columns([1, 6])
@@ -113,11 +119,11 @@ with st.container():
         )
     with cols[1]:
         st.markdown(f"""
-        <h1 style="color:#ED1C24; font-family: 'Arial Black', Gadget, sans-serif; margin-bottom: 0;">
-            \U0001F393 RMIT Cyber Security Course Advisor
+        <h1 style="color:#ED1C24; width:100% font-family: 'Arial Black', Gadget, sans-serif; margin-bottom: 0;">
+            \U0001F393 RMIT Student Support
         </h1>
-        <p style=" font-size:16px; margin-top: 0;">
-            This assistant helps students in RMIT's Bachelor of Cyber Security (BP355/BP356) choose courses.
+        <p style=" font-size:16px; margin-top: 0; ">
+            This assistant helps students to solve their problems.
         </p>
         """, unsafe_allow_html=True)
 
@@ -133,7 +139,6 @@ upload_mode = st.radio(
     horizontal=True
 )
 
-
 if upload_mode == "Structured JSON files":
     uploaded_courses_json = st.file_uploader("\U0001F4C1 Upload `courses_data.json`", type=["json"], key="courses")
     uploaded_structure_json = st.file_uploader("\U0001F4C1 Upload `cyber_security_program_structure.json`", type=["json"], key="structure")
@@ -142,6 +147,60 @@ else:
     uploaded_pdfs = st.file_uploader("\U0001F4C4 Upload one or more PDF files", type=["pdf"], accept_multiple_files=True)
     uploaded_courses_json = None
     uploaded_structure_json = None
+
+st.subheader("Advanced Settings")
+temperature = st.slider(
+    "🎛️ Response Creativity (Temperature)",
+    min_value=0.0,
+    max_value=1.0,
+    value=0.3,
+    step=0.05,
+    help="Higher = more creative, Lower = more focused and factual"
+)
+
+if st.button("📄 Summarize Uploaded Data", use_container_width=True):
+    try:
+        summary_prompt = None
+        if upload_mode == "Structured JSON files":
+            if uploaded_courses_json and uploaded_structure_json:
+                try:
+                    courses = json.load(uploaded_courses_json)
+                    structure = json.load(uploaded_structure_json)
+                    summary_prompt = (
+                        "You are a course advisor. Summarize the following:\n\n"
+                        f"Program Structure:\n{json.dumps(structure, indent=2)}\n\n"
+                        f"Courses Offered:\n{json.dumps(courses, indent=2)}"
+                    )
+                except json.JSONDecodeError:
+                    st.error("One or both JSON files are invalid. Please upload valid JSON files.")
+                    summary_prompt = None
+            else:
+                st.warning("Please upload both JSON files to summarize.")
+                summary_prompt = None
+
+        elif upload_mode == "Unstructured PDF files":
+            if uploaded_pdfs:
+                extracted_text = extract_text_from_pdfs(uploaded_pdfs)
+                if extracted_text.startswith("[No"):
+                    st.warning("No extractable text found in uploaded PDFs for summarization.")
+                    summary_prompt = None
+                else:
+                    summary_prompt = (
+                        "You are a course advisor. Summarize the following course and program document text:\n\n"
+                        + extracted_text
+                    )
+            else:
+                st.warning("Please upload at least one PDF file to summarize.")
+                summary_prompt = None
+
+        if summary_prompt:
+            with st.spinner("🔎 Summarizing..."):
+                summary = invoke_bedrock(summary_prompt, temperature=temperature)
+                st.text_area("📄 Claude's Summary", summary, height=300)
+                st.download_button("💾 Download Summary", summary, file_name="summary.txt")
+
+    except Exception as e:
+        st.error(f"❌ Error during summarization: {str(e)}")
 
 st.subheader("Step 2: Ask a question")
 user_question = st.text_input(
@@ -159,11 +218,19 @@ if st.button("\U0001F4A1 Get Advice", use_container_width=True):
     else:
         try:
             if upload_mode == "Structured JSON files":
-                courses = json.load(uploaded_courses_json)
-                structure = json.load(uploaded_structure_json)
+                try:
+                    courses = json.load(uploaded_courses_json)
+                    structure = json.load(uploaded_structure_json)
+                except json.JSONDecodeError:
+                    st.error("One or both JSON files are invalid. Please upload valid JSON files.")
+                    courses, structure = None, None
+                if courses is None or structure is None:
+                    st.stop()
                 prompt = build_prompt(courses, user_question, structure, st.session_state.chat_history)
             else:
                 extracted_text = extract_text_from_pdfs(uploaded_pdfs)
+                if extracted_text.startswith("[No"):
+                    extracted_text = "No course documents available to reference."
                 prompt = (
                     "You are a course advisor. The following is extracted from official course documents:\n\n"
                     + extracted_text +
@@ -172,7 +239,7 @@ if st.button("\U0001F4A1 Get Advice", use_container_width=True):
                 )
 
             with st.spinner("\U0001F50D Generating advice..."):
-                answer = invoke_bedrock(prompt)
+                answer = invoke_bedrock(prompt, temperature=temperature)
                 
             st.session_state.chat_history.append({"role": "user", "content": user_question})
             st.session_state.chat_history.append({"role": "assistant", "content": answer})
@@ -196,12 +263,10 @@ if st.button("🔄 Reset Chat History"):
     st.session_state.chat_history = []
     st.session_state.reset_flag = True
     st.success("Chat history cleared!")
-    # st.experimental_rerun()  # uncomment if available in your Streamlit
 
 if st.checkbox("📜 Show full chat history"):
     if st.session_state.reset_flag:
         st.info("Chat history was just cleared.")
-        # Reset the flag so next time chat history can show normally
         st.session_state.reset_flag = False
     else:
         for msg in st.session_state.chat_history:
